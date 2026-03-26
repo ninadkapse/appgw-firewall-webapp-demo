@@ -1,0 +1,17 @@
+# Temp / lock files
+~$*
+*.tmp
+
+# Generated PPTX (regenerate with: python create_pptx.py)
+*.pptx
+
+# ARM compiled output (regenerated from Bicep)
+main.json
+
+# Python
+__pycache__/
+*.pyc
+
+# OS
+Thumbs.db
+.DS_Store
