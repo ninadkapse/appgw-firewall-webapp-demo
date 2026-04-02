@@ -77,6 +77,10 @@ Private Endpoint → Web App       ← Reads original client IP from X-Forwarded
 | **Zero Public Access** | Web App `publicNetworkAccess: Disabled` — Private Endpoint only |
 | **Symmetric Routing** | Firewall SNAT forced via `privateRanges: 255.255.255.255/32` |
 | **Full Audit Trail** | Log Analytics with App Gateway access/WAF logs + Firewall logs |
+| **Geo-Filtering** | WAF custom rules block traffic from non-allowed countries |
+| **VPN + WAF Security** | VPN clients bypass geo-block but managed rules (OWASP, Bot) still apply |
+| **Private Frontend** | App Gateway private listener for VPN/internal access |
+| **P2S VPN** | Optional VPN Gateway with certificate-based Point-to-Site VPN |
 
 ## 📁 Project Structure
 
@@ -84,15 +88,17 @@ Private Endpoint → Web App       ← Reads original client IP from X-Forwarded
 ├── main.bicep                      # Orchestration — wires all modules together
 ├── deploy.ps1                      # One-command deployment script
 ├── verify-xff.ps1                  # Automated X-Forwarded-For verification
+├── test-geofencing-vpn.ps1         # Geo-filtering + VPN WAF verification
 ├── create_pptx.py                  # Generates PowerPoint presentation
 ├── DEMO-WALKTHROUGH.md             # Step-by-step demo guide
 └── modules/
-    ├── networking.bicep             # VNet, 4 subnets, NSGs, route table
+    ├── networking.bicep             # VNet, 5 subnets (incl. GatewaySubnet), NSGs, route table
     ├── firewall.bicep               # Azure Firewall Premium, policy, IDPS
-    ├── appgateway.bicep             # App Gateway WAF_v2, WAF policy
+    ├── appgateway.bicep             # App Gateway WAF_v2, WAF policy, geo-filter + VPN rules, private frontend
     ├── webapp.bicep                 # App Service Plan, Web App, Private Endpoint, DNS
     ├── existing-webapp.bicep        # Variant: integrate with an existing Web App
     ├── routes.bicep                 # UDR: App Gateway subnet → Firewall next hop
+    ├── vpngateway.bicep             # VPN Gateway with P2S VPN (optional)
     └── loganalytics.bicep           # Log Analytics + diagnostic settings
 ```
 
@@ -116,6 +122,19 @@ az login
 # Deploy (defaults to westus2)
 .\deploy.ps1 -ResourceGroupName "rg-appgw-fw-demo" -Location "westus2"
 ```
+
+#### Deploy with Geo-Filtering + VPN Gateway
+
+```powershell
+# Deploy with geo-filtering (default: allow US only) + VPN Gateway for E2E testing
+.\deploy.ps1 -ResourceGroupName "rg-appgw-fw-demo" -DeployVpnGateway $true
+
+# Deploy with custom allowed countries
+.\deploy.ps1 -ResourceGroupName "rg-appgw-fw-demo" -AllowedCountryCodes @('US','IN','GB')
+```
+
+> **Note:** VPN Gateway adds ~30 minutes to deployment and costs ~$0.19/hr (~$140/month).
+> Geo-filtering custom rules are deployed by default even without the VPN Gateway.
 
 The deployment takes approximately **15–20 minutes** (Azure Firewall is the longest provisioning step).
 
@@ -166,6 +185,14 @@ AzureDiagnostics
 | order by TimeGenerated desc
 ```
 
+**WAF Custom Rule Logs** — see geo-blocks and VPN allow events:
+```kql
+AzureDiagnostics
+| where Category == "ApplicationGatewayFirewallLog"
+| project TimeGenerated, clientIp_s, ruleId_s, action_s, Message
+| order by TimeGenerated desc
+```
+
 **WAF Logs** — see blocked attacks:
 ```kql
 AzureDiagnostics
@@ -191,6 +218,10 @@ AZFWNetworkRule
 | **Private Endpoints** | [App Service Private Endpoint](https://learn.microsoft.com/en-us/azure/app-service/networking/private-endpoint) |
 | **X-Forwarded-For** | [How Application Gateway works — header modifications](https://learn.microsoft.com/en-us/azure/application-gateway/how-application-gateway-works#modifications-to-the-request) |
 | **WAF Best Practices** | [Best practices for WAF on Application Gateway](https://learn.microsoft.com/en-us/azure/web-application-firewall/ag/best-practices) |
+| **WAF Geomatch Rules** | [Geomatch custom rules for geo-filtering](https://learn.microsoft.com/en-us/azure/web-application-firewall/ag/geomatch-custom-rules) |
+| **WAF Custom Rules** | [Custom rules overview and evaluation order](https://learn.microsoft.com/en-us/azure/web-application-firewall/ag/custom-waf-rules-overview) |
+| **Geomatch Examples** | [Geomatch custom rules examples](https://learn.microsoft.com/en-us/azure/web-application-firewall/geomatch-custom-rules-examples) |
+| **Private App Gateway** | [Private Application Gateway deployment](https://learn.microsoft.com/en-us/azure/application-gateway/application-gateway-private-deployment) |
 | **Well-Architected Framework** | [Application Gateway — reliability & security](https://learn.microsoft.com/en-us/azure/well-architected/service-guides/azure-application-gateway) |
 
 ## 🧹 Cleanup

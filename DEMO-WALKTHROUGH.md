@@ -190,3 +190,177 @@ All resource names are derived from the `appName` parameter (default: `demoapp`)
 | WAF protection | App Gateway WAF_v2 with OWASP 3.2 rules in Prevention mode |
 | Symmetric routing | Firewall SNAT on private traffic ensures return path matches |
 | Audit trail | Log Analytics captures App Gateway access logs + Firewall logs |
+
+---
+
+## Use Case 2: Geofencing + VPN Bypass Security
+
+> **Problem:** When applying geofencing rules on WAF, VPN users get private IPs that
+> cannot be geo-resolved — bypassing geo-restrictions. We need VPN users to still be
+> protected by WAF managed rules while exempting them from geo-blocks.
+
+> **Microsoft Reference:**
+> - [Azure WAF Geomatch Custom Rules](https://learn.microsoft.com/en-us/azure/web-application-firewall/ag/geomatch-custom-rules)
+> - [WAF Custom Rules Overview](https://learn.microsoft.com/en-us/azure/web-application-firewall/ag/custom-waf-rules-overview)
+> - [WAF Best Practices](https://learn.microsoft.com/en-us/azure/web-application-firewall/ag/best-practices)
+> - [Geomatch Custom Rules Examples](https://learn.microsoft.com/en-us/azure/web-application-firewall/geomatch-custom-rules-examples)
+
+### Architecture
+
+```
+┌──────────────┐                    ┌─────────────────────────────────────────┐
+│  Internet    │───────────────────▶│ App Gateway (WAF_v2)                    │
+│  Client      │  Public Frontend   │ ┌─────────────────────────────────────┐ │
+└──────────────┘                    │ │ WAF Custom Rule (compound Block):   │ │
+                                    │ │  Block if:                          │ │
+┌──────────────┐     ┌──────────┐  │ │   GeoMatch NOT IN [allowed]  AND   │ │
+│  VPN Client  │────▶│ VPN GW   │──▶│ │   IPMatch NOT IN [VPN/internal]    │ │
+│  (VPN Pool)  │     │ (P2S)    │  │ │ Managed Rules:                      │ │
+└──────────────┘     └──────────┘  │ │  OWASP 3.2 + Bot Manager (always)  │ │
+                    Private Frontend│ └─────────────────────────────────────┘ │
+                                    └────────────────┬────────────────────────┘
+                                                     ▼
+                                    ┌──────────────────┐     ┌──────────────────┐
+                                    │ Azure Firewall   │────▶│ Web App (PE)     │
+                                    │ Premium + IDPS   │     │ No public access │
+                                    └──────────────────┘     └──────────────────┘
+```
+
+### The Solution: Single Compound Block Rule
+
+> ⚠️ **Common Mistake:** Using a separate "Allow" rule for VPN IPs causes WAF to skip
+> ALL subsequent rules **including managed rules (OWASP)**. This means VPN traffic would
+> have zero protection against SQL injection, XSS, etc.
+
+**Correct approach:** A single compound **Block** rule with two AND conditions:
+
+```
+Rule: GeoBlockExcludeVpn  (Priority 10, Action: Block)
+  Condition 1 (AND): GeoMatch  NOT IN  [allowed country codes]
+  Condition 2 (AND): IPMatch   NOT IN  [VPN address pool, internal ranges]
+```
+
+When the rule doesn't fire (because either condition is FALSE), traffic falls through
+to managed rules (OWASP 3.2 + Bot Manager) for full L7 protection.
+
+### Traffic Flow Summary
+
+| Source | Cond 1 (NOT allowed geo?) | Cond 2 (NOT VPN IP?) | Rule Fires? | Managed Rules | Result |
+|--------|--------------------------|---------------------|-------------|---------------|--------|
+| Internet (allowed country) | ❌ FALSE | — | NO | ✅ Evaluated | 200 OK |
+| Internet (blocked country) | ✅ TRUE | ✅ TRUE | YES → Block | N/A | 403 Forbidden |
+| VPN client (normal) | ✅ TRUE | ❌ FALSE | NO | ✅ Evaluated | 200 OK |
+| VPN + SQL injection | ✅ TRUE | ❌ FALSE | NO | ❌ OWASP blocks | 403 Forbidden |
+
+---
+
+### Demo Steps: Geofencing + VPN
+
+#### Step 8 — Verify WAF Custom Rule Is Deployed
+
+```powershell
+az network application-gateway waf-policy show `
+    -g <RESOURCE_GROUP> -n <appName>-waf-policy `
+    --query "customRules[].{Name:name, Priority:priority, Action:action}" `
+    -o table
+```
+
+**Expected:**
+```
+Name                  Priority    Action
+--------------------  ----------  --------
+GeoBlockExcludeVpn    10          Block
+```
+
+(Single compound rule with two match conditions — verify via Azure Portal → Custom Rules)
+
+---
+
+#### Step 9 — Test Geo-Filtering (Internet Access)
+
+From your local machine (in an allowed country):
+
+```powershell
+# Should succeed — your country is in the allow list
+Invoke-RestMethod -Uri "http://<APP_GATEWAY_PIP>"
+```
+
+**Expected:** HTTP 200 with JSON echo response.
+
+To verify geo-blocking, check WAF logs after a request from a non-allowed region
+(or temporarily remove your country from the allow list):
+
+```kusto
+AzureDiagnostics
+| where Category == "ApplicationGatewayFirewallLog"
+| where action_s == "Blocked"
+| project TimeGenerated, clientIp_s, ruleId_s, action_s, Message
+| order by TimeGenerated desc
+| take 5
+```
+
+---
+
+#### Step 10 — Prove Managed Rules Still Protect VPN Traffic
+
+Send a SQL injection from VPN (via App Gateway private frontend):
+
+```powershell
+# OWASP managed rules should block this — compound rule does NOT fire for VPN IPs
+Invoke-WebRequest -Uri "http://<APP_GATEWAY_PRIVATE_IP>/?id=1' OR '1'='1" -ErrorAction SilentlyContinue
+```
+
+**Expected:** `403 Forbidden` — OWASP 3.2 blocked the SQL injection.
+
+This proves that the compound Block rule correctly exempts VPN traffic while
+managed rules continue to evaluate.
+
+---
+
+#### Step 11 — Test VPN Access (Requires VPN Gateway)
+
+If deployed with `-DeployVpnGateway $true`:
+
+```powershell
+# 1. Download and install VPN client
+az network vnet-gateway vpn-client generate `
+    -g <RESOURCE_GROUP> -n <appName>-vpngw -o tsv
+
+# 2. Connect to P2S VPN via Azure VPN Client
+
+# 3. Access via App Gateway private frontend
+curl http://<APP_GATEWAY_PRIVATE_IP>
+
+# 4. Verify SQL injection is still blocked from VPN
+curl "http://<APP_GATEWAY_PRIVATE_IP>/?id=1' OR '1'='1"
+```
+
+**Expected:**
+- Step 3: HTTP 200 — VPN client exempted by compound rule (Cond 2 = FALSE)
+- Step 4: HTTP 403 — OWASP managed rules still protect VPN traffic
+
+---
+
+#### Step 12 — Check WAF Logs for Both Rule Types
+
+```kusto
+AzureDiagnostics
+| where Category == "ApplicationGatewayFirewallLog"
+| extend RuleType = case(
+    ruleId_s startswith "Geo", "Custom Rule",
+    "Managed Rule"
+  )
+| project TimeGenerated, clientIp_s, RuleType, ruleId_s, action_s, Message
+| order by TimeGenerated desc
+| take 20
+```
+
+---
+
+### Automated Geofencing Verification
+
+Run the included script for comprehensive verification:
+
+```powershell
+.\test-geofencing-vpn.ps1 -ResourceGroupName "<your-resource-group>"
+```

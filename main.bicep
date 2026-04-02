@@ -27,6 +27,24 @@ param appServicePlanSku string = 'P1v3'
 @description('Deploy the header-echo demo container (set false for production workloads)')
 param deployDemoApp bool = true
 
+@description('Deploy VPN Gateway for P2S VPN demo (adds ~30 min deployment, ~$0.19/hr cost)')
+param deployVpnGateway bool = false
+
+@description('Enable geo-filtering WAF custom rules')
+param enableGeoFiltering bool = true
+
+@description('Country codes allowed through geo-filter (ISO 3166-1 alpha-2)')
+param allowedCountryCodes array = [
+  'US'
+]
+
+@description('VPN client address pool CIDR')
+param vpnAddressPool string = '172.16.0.0/24'
+
+@secure()
+@description('Base64-encoded VPN root certificate public key (required when deployVpnGateway is true)')
+param vpnRootCertData string = ''
+
 // ─── 1. Networking (VNet, subnets, NSGs, route table shell) ─
 module networking 'modules/networking.bicep' = {
   name: 'networking-deployment'
@@ -81,6 +99,9 @@ module appgateway 'modules/appgateway.bicep' = {
     appGatewaySubnetId: networking.outputs.appGatewaySubnetId
     backendFqdn: webapp.outputs.webAppDefaultHostName
     wafMode: wafMode
+    enableGeoFiltering: enableGeoFiltering
+    allowedCountryCodes: allowedCountryCodes
+    vpnAddressPool: vpnAddressPool
   }
   dependsOn: [
     routes
@@ -98,9 +119,23 @@ module loganalytics 'modules/loganalytics.bicep' = {
   }
 }
 
+// ─── 7. VPN Gateway (optional — for P2S VPN demo) ───────────
+module vpngateway 'modules/vpngateway.bicep' = if (deployVpnGateway) {
+  name: 'vpngateway-deployment'
+  params: {
+    location: location
+    appName: appName
+    gatewaySubnetId: networking.outputs.gatewaySubnetId
+    vpnAddressPool: vpnAddressPool
+    vpnRootCertData: vpnRootCertData
+  }
+}
+
 // ─── Outputs ────────────────────────────────────────────────
 output appGatewayPublicIp string = appgateway.outputs.appGatewayPublicIp
+output appGatewayPrivateIp string = appgateway.outputs.appGatewayPrivateIp
 output webAppHostName string = webapp.outputs.webAppDefaultHostName
 output webAppName string = webapp.outputs.webAppName
 output firewallPrivateIp string = firewall.outputs.firewallPrivateIp
 output logAnalyticsWorkspaceId string = loganalytics.outputs.workspaceCustomerId
+output vpnGatewayPublicIp string = deployVpnGateway ? vpngateway.outputs.vpnGatewayPublicIp : 'not deployed'

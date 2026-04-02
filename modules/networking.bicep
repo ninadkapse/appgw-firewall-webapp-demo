@@ -15,6 +15,8 @@ var appServiceSubnetName = 'AppServiceSubnet'
 var appServiceSubnetPrefix = '10.0.2.0/24'
 var peSubnetName = 'PrivateEndpointSubnet'
 var peSubnetPrefix = '10.0.3.0/24'
+var gatewaySubnetName = 'GatewaySubnet'
+var gatewaySubnetPrefix = '10.0.4.0/27'
 
 // ─── NSG for Application Gateway subnet ────────────────────
 resource appGwNsg 'Microsoft.Network/networkSecurityGroups@2023-11-01' = {
@@ -161,6 +163,13 @@ resource vnet 'Microsoft.Network/virtualNetworks@2023-11-01' = {
           privateEndpointNetworkPolicies: 'Disabled'
         }
       }
+      // GatewaySubnet — required for VPN Gateway (P2S VPN demo)
+      {
+        name: gatewaySubnetName
+        properties: {
+          addressPrefix: gatewaySubnetPrefix
+        }
+      }
     ]
   }
 }
@@ -175,3 +184,4 @@ output privateEndpointSubnetId string = vnet.properties.subnets[3].id
 output appGatewaySubnetPrefix string = appGwSubnetPrefix
 output privateEndpointSubnetPrefix string = peSubnetPrefix
 output appGwRouteTableName string = appGwRouteTable.name
+output gatewaySubnetId string = vnet.properties.subnets[4].id

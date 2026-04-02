@@ -8,6 +8,16 @@
 # ARM compiled output (regenerated from Bicep)
 main.json
 
+# Certificates and VPN client packages (sensitive)
+*.pfx
+*.cer
+*.pem
+vpnclient/
+vpnclient.zip
+
+# Screenshots (deployment-specific, not generic)
+waf-custom-rule-screenshot.png
+
 # Python
 __pycache__/
 *.pyc

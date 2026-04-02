@@ -17,6 +17,20 @@ param backendFqdn string
 ])
 param wafMode string = 'Prevention'
 
+@description('Enable geo-filtering WAF custom rules (blocks traffic from non-allowed countries)')
+param enableGeoFiltering bool = true
+
+@description('Country codes allowed through geo-filter (ISO 3166-1 alpha-2). Traffic from other countries is blocked.')
+param allowedCountryCodes array = [
+  'US'
+]
+
+@description('VPN client address pool CIDR — added to WAF allow list so VPN users bypass geo-filter while managed rules still apply')
+param vpnAddressPool string = '172.16.0.0/24'
+
+@description('Static private IP for the App Gateway private frontend (must be in AppGateway subnet)')
+param appGatewayPrivateIp string = '10.0.0.100'
+
 var appGwName = '${appName}-appgw'
 
 // ─── Application Gateway Public IP ──────────────────────────
@@ -43,6 +57,44 @@ resource wafPolicy 'Microsoft.Network/ApplicationGatewayWebApplicationFirewallPo
       state: 'Enabled'
       mode: wafMode
     }
+    // ─── Custom Rules: Geofencing + VPN Access ─────────────────
+    // Single compound rule: Block if (NOT from allowed country) AND (NOT from VPN/internal).
+    // VPN traffic doesn't match → falls through to managed rules (OWASP, Bot) for full protection.
+    // This avoids the "Allow" action which skips managed rule evaluation.
+    customRules: enableGeoFiltering ? [
+      {
+        name: 'GeoBlockExcludeVpn'
+        priority: 10
+        ruleType: 'MatchRule'
+        action: 'Block'
+        state: 'Enabled'
+        matchConditions: [
+          {
+            matchVariables: [
+              {
+                variableName: 'RemoteAddr'
+              }
+            ]
+            operator: 'GeoMatch'
+            negationConditon: true
+            matchValues: allowedCountryCodes
+          }
+          {
+            matchVariables: [
+              {
+                variableName: 'RemoteAddr'
+              }
+            ]
+            operator: 'IPMatch'
+            negationConditon: true
+            matchValues: [
+              vpnAddressPool
+              '10.0.0.0/8'
+            ]
+          }
+        ]
+      }
+    ] : []
     managedRules: {
       managedRuleSets: [
         {
@@ -91,6 +143,16 @@ resource appGw 'Microsoft.Network/applicationGateways@2023-11-01' = {
           publicIPAddress: {
             id: appGwPip.id
           }
+        }
+      }
+      {
+        name: 'appGwPrivateFrontendIp'
+        properties: {
+          subnet: {
+            id: appGatewaySubnetId
+          }
+          privateIPAllocationMethod: 'Static'
+          privateIPAddress: appGatewayPrivateIp
         }
       }
     ]
@@ -156,6 +218,26 @@ resource appGw 'Microsoft.Network/applicationGateways@2023-11-01' = {
           protocol: 'Http'
         }
       }
+      {
+        name: 'privateHttpListener'
+        properties: {
+          frontendIPConfiguration: {
+            id: resourceId(
+              'Microsoft.Network/applicationGateways/frontendIPConfigurations',
+              appGwName,
+              'appGwPrivateFrontendIp'
+            )
+          }
+          frontendPort: {
+            id: resourceId(
+              'Microsoft.Network/applicationGateways/frontendPorts',
+              appGwName,
+              'port_80'
+            )
+          }
+          protocol: 'Http'
+        }
+      }
     ]
     requestRoutingRules: [
       {
@@ -168,6 +250,34 @@ resource appGw 'Microsoft.Network/applicationGateways@2023-11-01' = {
               'Microsoft.Network/applicationGateways/httpListeners',
               appGwName,
               'httpListener'
+            )
+          }
+          backendAddressPool: {
+            id: resourceId(
+              'Microsoft.Network/applicationGateways/backendAddressPools',
+              appGwName,
+              'webAppBackendPool'
+            )
+          }
+          backendHttpSettings: {
+            id: resourceId(
+              'Microsoft.Network/applicationGateways/backendHttpSettingsCollection',
+              appGwName,
+              'webAppHttpSettings'
+            )
+          }
+        }
+      }
+      {
+        name: 'privateHttpRoutingRule'
+        properties: {
+          priority: 200
+          ruleType: 'Basic'
+          httpListener: {
+            id: resourceId(
+              'Microsoft.Network/applicationGateways/httpListeners',
+              appGwName,
+              'privateHttpListener'
             )
           }
           backendAddressPool: {
@@ -210,4 +320,5 @@ resource appGw 'Microsoft.Network/applicationGateways@2023-11-01' = {
 
 // ─── Outputs ────────────────────────────────────────────────
 output appGatewayPublicIp string = appGwPip.properties.ipAddress
+output appGatewayPrivateIp string = appGatewayPrivateIp
 output appGatewayName string = appGw.name
